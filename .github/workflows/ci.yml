@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
+        env:
+          POSTGRES_USER: service
+          POSTGRES_PASSWORD: service
+          POSTGRES_DB: service_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U service -d service_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://service:service@localhost:5432/service_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.7.15"
+      - run: uv python install 3.13
+      - run: uv sync --locked --python 3.13
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked pyright
+      - run: uv run --locked pytest
+      - run: docker build -t emberpath-weight-service:ci .
+      - name: Smoke test container runtime
+        run: |
+          container_name=emberpath-weight-service-ci
+          host_port=18000
+
+          cleanup() {
+            docker logs "$container_name" || true
+            docker rm --force "$container_name" || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$container_name" --env ENVIRONMENT=production --env ALLOWED_HOSTS=api.example.com --env DATABASE_REQUIRED=true --env DATABASE_URL=postgresql+psycopg://service:service@host.docker.internal:5432/service_test --add-host host.docker.internal:host-gateway --publish "127.0.0.1:${host_port}:8000" emberpath-weight-service:ci
+
+          for attempt in {1..60}; do
+            health_status="$(docker inspect --format='{{.State.Health.Status}}' "$container_name")"
+            if [[ "$health_status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$health_status" == "unhealthy" ]]; then
+              echo "Container became unhealthy."
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [[ "${health_status:-}" != "healthy" ]]; then
+            echo "Container did not become healthy within 120 seconds."
+            exit 1
+          fi
+
+          curl --fail --show-error --silent --header "Host: api.example.com" "http://127.0.0.1:${host_port}/healthz"
+          curl --fail --show-error --silent --header "Host: api.example.com" "http://127.0.0.1:${host_port}/readyz"

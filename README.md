@@ -16,8 +16,9 @@ Copy-Item .env.example .env
 ```
 
 `.env` er lokal konfigurasjon og ignoreres av Git. Miljøvariabler overstyrer
-verdiene i filen. `DATABASE_URL` brukes av appen og Alembic; `TEST_DATABASE_URL`
-brukes kun av testene. `uv.lock` låser avhengighetsversjonene.
+verdiene i filen. `DATABASE_URL` brukes av appen og Alembic. Sett
+`TEST_DATABASE_URL` kun som miljøvariabel i terminalen, aldri i `.env`: ukjente
+konfigurasjonsnøkler avvises. Testene leser ikke den lokale `.env`-filen. `uv.lock` låser avhengighetsversjonene.
 
 ## Kjør hele appen i Docker
 
@@ -64,7 +65,9 @@ har `POSTGRES_PORT=55432`, bruk
 `postgresql+psycopg://emberpath:emberpath_local@127.0.0.1:55432/emberpath`
 som `DATABASE_URL` med standardpassordet.
 
-`--reload` laster kodeendringer automatisk. Stopp med `Ctrl+C`.
+`--reload` laster kodeendringer automatisk. På Windows velger denne modusen
+også Selector-eventløkken som async Psycopg krever; bruk kommandoen over ved
+lokal utvikling, og Linux-containeren for kjøring uten reload. Stopp med `Ctrl+C`.
 Swagger UI finnes på `http://127.0.0.1:8000/docs` ved standard port.
 Web bruker `/api` via Vite-proxy lokalt og Nginx-proxy i Docker, så nettleseren
 kan kalle API-et fra samme origin uten egen CORS-konfigurasjon. Det gjelder
@@ -75,6 +78,8 @@ backend trenger derfor ikke bindes til alle nettverksgrensesnitt.
 
 | Metode | Endepunkt | Resultat |
 | --- | --- | --- |
+| GET | `/` | Navn, versjon og dokumentasjonslenke når dokumentasjon er aktivert |
+| GET | `/readyz` | 200 når påkrevde databasekall fungerer, ellers 503 |
 | GET | `/healthz` | 200 og `{"status":"ok"}`, uten databasekall |
 | POST | `/weight-logs` | Opprett logg, 201 |
 | GET | `/weight-logs` | Liste, nyeste dato først |
@@ -109,18 +114,20 @@ Testene kjører mot en egen PostgreSQL-container på port 5433. De bruker aldri
 cd C:\Workspace\Repos\Emberpath
 docker compose --profile test up -d --wait postgres-test
 cd ..\Emberpath-weight-service
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
+$env:TEST_DATABASE_URL = "postgresql+psycopg://emberpath:emberpath_test@127.0.0.1:5433/emberpath_test"
+uv run --locked pytest -W error
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pyright
 ```
 
 Testene migrerer `emberpath_test` før kjøring og ruller hver test tilbake i en
 isolert transaksjon. En egendefinert `TEST_DATABASE_URL` må bruke PostgreSQL
 og et databasenavn som slutter på `_test`. Testene feiler hvis databasen ikke
-kjører. Uvicorn trenger ikke å kjøre. Kun helsetesten krever ingen database:
+kjører. Uvicorn trenger ikke å kjøre. De øvrige testene kan kjøres uten database:
 
 ```powershell
-uv run pytest tests/test_health.py
+uv run --locked pytest -m "not integration" -W error
 ```
 
 Testdekningen omfatter CRUD, sortering, duplikatdato, delvis oppdatering,
@@ -144,6 +151,38 @@ uv run alembic upgrade head
 - `src/schemas/`: validering og API-responser.
 - `src/routers/`: helse og CRUD.
 - `alembic/`: versjonerte databaseendringer.
-- `tests/`: helsetest og PostgreSQL-integrasjonstester.
+- `tests/`: drifts-, kontrakt- og PostgreSQL-integrasjonstester.
 
 Tjenesten er foreløpig for lokal bruk med én bruker, uten autentisering.
+
+## Standard fra FastAPI-service
+
+App-fabrikken `create_app(settings)` gir hver app sin egen late databasepool.
+Økter bruker async SQLAlchemy/Psycopg; poolen lukkes ved avslutning. Alembic
+bruker fortsatt synkron Psycopg for migreringer. Eksisterende modell og migrering
+`0001_create_weight_logs` er uendret; ingen ny migrering eller database-reset kreves.
+
+`DATABASE_REQUIRED=true` er satt i eksempelkonfigurasjonen og Compose. Da kreves
+`DATABASE_URL` ved oppstart, og `/readyz` kontrollerer databasen. `/healthz` og `/`
+gjør aldri databasekall. Uten eksplisitt konfigurasjon er databasen valgfri, som i
+templaten; den modusen er kun nyttig for isolerte tester og metadata/helse.
+
+Alle svar får `X-Request-ID` og sikkerhetsheadere. Driftsfeil bruker
+`{"detail":"...","request_id":"..."}`. For kompatibilitet beholder
+`/weight-logs` sine eksisterende feilformater: 404/409 har kun `detail`, og 422
+har FastAPIs detaljerte valideringsliste. OpenAPI dokumenterer fortsatt dette.
+Ruter er ikke flyttet til `/api/v1`; eksisterende frontend og proxy virker uendret.
+
+Strukturerte logger beholder exception-type og kildelokasjoner, men skjuler
+exception-meldinger og databaseparametre. Ikke logg måledata eller credentials.
+Dette gir mindre feilsøkingsinformasjon, med hensikt å beskytte persondata.
+
+Sett `ENVIRONMENT=production` og eksplisitte `ALLOWED_HOSTS` ved produksjonskjøring.
+Dokumentasjon er da deaktivert med mindre `DOCS_ENABLED=true` er valgt. Dockerens
+helseprobe bruker en tillatt Host-header. Compose bruker `/readyz` for avhengigheter.
+Databasepool, tilkoblings-, spørrings-, låse- og transaksjonstimeouts kan justeres
+via variablene i `.env.example`. Same-origin-proxyen trenger normalt ikke CORS.
+
+CI installerer låste avhengigheter, kjører Ruff, streng Pyright og alle tester med
+PostgreSQL, bygger Docker-image og tester containeren med produksjonsverter og
+påkrevd database. Den publiserer eller deployer ingenting.

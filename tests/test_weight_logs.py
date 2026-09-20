@@ -1,12 +1,12 @@
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import AsyncClient
 
 
-def test_weight_log_lifecycle(client: TestClient) -> None:
-    assert client.get("/weight-logs").json() == []
-    response = client.post(
+async def test_weight_log_lifecycle(client: AsyncClient) -> None:
+    assert (await client.get("/weight-logs")).json() == []
+    response = await client.post(
         "/weight-logs", json={"date": "2026-09-17", "weight_kg": 82.35}
     )
     assert response.status_code == 201
@@ -14,66 +14,64 @@ def test_weight_log_lifecycle(client: TestClient) -> None:
     assert UUID(log["id"])
     assert log == {"id": log["id"], "date": "2026-09-17", "weight_kg": 82.35}
     url = f"/weight-logs/{log['id']}"
-    assert client.get(url).status_code == 200
-    assert client.get(url).json() == log
-    response = client.get("/weight-logs")
+    assert (await client.get(url)).status_code == 200
+    assert (await client.get(url)).json() == log
+    response = await client.get("/weight-logs")
     assert response.status_code == 200
     assert response.json() == [log]
-
-    response = client.patch(url, json={"weight_kg": 81.2})
+    response = await client.patch(url, json={"weight_kg": 81.2})
     assert response.status_code == 200
     assert response.json() == {**log, "weight_kg": 81.2}
-    response = client.patch(url, json={"date": "2026-09-16"})
+    response = await client.patch(url, json={"date": "2026-09-16"})
     assert response.status_code == 200
     assert response.json() == {**log, "date": "2026-09-16", "weight_kg": 81.2}
-    assert client.get(url).json() == response.json()
-
-    response = client.delete(url)
+    assert (await client.get(url)).json() == response.json()
+    response = await client.delete(url)
     assert response.status_code == 204
     assert response.content == b""
-    assert client.get(url).status_code == 404
-    assert client.get("/weight-logs").json() == []
+    assert (await client.get(url)).status_code == 404
+    assert (await client.get("/weight-logs")).json() == []
 
 
-def test_logs_are_sorted_by_date_descending(client: TestClient) -> None:
+async def test_logs_are_sorted_by_date_descending(client: AsyncClient) -> None:
     for day in ["2026-09-16", "2026-09-18", "2026-09-17"]:
-        response = client.post("/weight-logs", json={"date": day, "weight_kg": 80})
+        response = await client.post(
+            "/weight-logs", json={"date": day, "weight_kg": 80}
+        )
         assert response.status_code == 201
-    assert [log["date"] for log in client.get("/weight-logs").json()] == [
+    assert [log["date"] for log in (await client.get("/weight-logs")).json()] == [
         "2026-09-18",
         "2026-09-17",
         "2026-09-16",
     ]
 
 
-def test_date_conflicts_do_not_change_existing_logs(client: TestClient) -> None:
-    first = client.post(
-        "/weight-logs", json={"date": "2026-09-17", "weight_kg": 80}
+async def test_date_conflicts_do_not_change_existing_logs(client: AsyncClient) -> None:
+    first = (
+        await client.post("/weight-logs", json={"date": "2026-09-17", "weight_kg": 80})
     ).json()
-    second = client.post(
-        "/weight-logs", json={"date": "2026-09-18", "weight_kg": 81}
+    second = (
+        await client.post("/weight-logs", json={"date": "2026-09-18", "weight_kg": 81})
     ).json()
-    response = client.post("/weight-logs", json={"date": "2026-09-17", "weight_kg": 82})
+    response = await client.post(
+        "/weight-logs", json={"date": "2026-09-17", "weight_kg": 82}
+    )
     assert response.status_code == 409
     assert isinstance(response.json()["detail"], str)
-    response = client.patch(
-        f"/weight-logs/{second['id']}",
-        json={"date": "2026-09-17", "weight_kg": 79},
+    response = await client.patch(
+        f"/weight-logs/{second['id']}", json={"date": "2026-09-17", "weight_kg": 79}
     )
     assert response.status_code == 409
-    assert client.get("/weight-logs").json() == [second, first]
+    assert (await client.get("/weight-logs")).json() == [second, first]
     assert (
-        client.patch(
-            f"/weight-logs/{first['id']}", json={"date": "2026-09-17"}
-        ).status_code
-        == 200
-    )
+        await client.patch(f"/weight-logs/{first['id']}", json={"date": "2026-09-17"})
+    ).status_code == 200
 
 
 @pytest.mark.parametrize("method", ["get", "patch", "delete"])
-def test_missing_log(client: TestClient, method: str) -> None:
+async def test_missing_log(client: AsyncClient, method: str) -> None:
     kwargs = {"json": {"weight_kg": 80}} if method == "patch" else {}
-    response = client.request(method, f"/weight-logs/{uuid4()}", **kwargs)
+    response = await client.request(method, f"/weight-logs/{uuid4()}", **kwargs)
     assert response.status_code == 404
     assert response.json() == {"detail": "Weight log not found"}
 
@@ -95,23 +93,28 @@ def test_missing_log(client: TestClient, method: str) -> None:
         {"date": "2026-09-17", "weight_kg": 80, "note": "unsupported"},
     ],
 )
-def test_invalid_create(client: TestClient, payload: dict) -> None:
-    assert client.post("/weight-logs", json=payload).status_code == 422
-    assert client.get("/weight-logs").json() == []
+async def test_invalid_create(client: AsyncClient, payload: dict) -> None:
+    assert (await client.post("/weight-logs", json=payload)).status_code == 422
+    assert (await client.get("/weight-logs")).json() == []
 
 
 @pytest.mark.parametrize(
     "payload",
     [{}, {"date": None}, {"weight_kg": None}, {"weight_kg": 0}, {"weight_kg": 80.123}],
 )
-def test_invalid_update_keeps_log_unchanged(client: TestClient, payload: dict) -> None:
-    log = client.post(
-        "/weight-logs", json={"date": "2026-09-17", "weight_kg": 80}
+async def test_invalid_update_keeps_log_unchanged(
+    client: AsyncClient, payload: dict
+) -> None:
+    log = (
+        await client.post("/weight-logs", json={"date": "2026-09-17", "weight_kg": 80})
     ).json()
     url = f"/weight-logs/{log['id']}"
-    assert client.patch(url, json=payload).status_code == 422
-    assert client.get(url).json() == log
+    assert (await client.patch(url, json=payload)).status_code == 422
+    assert (await client.get(url)).json() == log
 
 
-def test_invalid_id(client: TestClient) -> None:
-    assert client.get("/weight-logs/not-a-uuid").status_code == 422
+async def test_invalid_id(client: AsyncClient) -> None:
+    assert (await client.get("/weight-logs/not-a-uuid")).status_code == 422
+
+
+pytestmark = [pytest.mark.anyio, pytest.mark.integration]
