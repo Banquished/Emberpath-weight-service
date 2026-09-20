@@ -1,7 +1,7 @@
 # Emberpath Weight Service
 
 FastAPI-tjeneste for daglige vektlogger, med PostgreSQL, SQLAlchemy og Alembic.
-Én registrering per dato. Vekten lagres som `NUMERIC(6, 2)` og må være positiv,
+Én registrering per bruker og dato. Vekten lagres som `NUMERIC(6, 2)` og må være positiv,
 maks 9999,99 kg, med inntil to desimaler. API-et returnerer vekten som JSON-tall.
 
 ## Installasjon
@@ -87,23 +87,25 @@ backend trenger derfor ikke bindes til alle nettverksgrensesnitt.
 | PATCH | `/weight-logs/{id}` | Endre dato og/eller vekt, 200 |
 | DELETE | `/weight-logs/{id}` | Slett logg, 204 uten responsinnhold |
 
-Eksempel på opprettelse fra PowerShell:
+Eksempel fra PowerShell, med et kortlevd Clerk-sessiontoken satt i
+`CLERK_SESSION_TOKEN` for denne terminalen (ikke lagre token i Git):
 
 ```powershell
-$log = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/weight-logs `
+$headers = @{ Authorization = "Bearer $env:CLERK_SESSION_TOKEN" }
+$log = Invoke-RestMethod -Headers $headers -Method Post -Uri http://127.0.0.1:8000/weight-logs `
   -ContentType application/json -Body '{"date":"2026-09-17","weight_kg":82.35}'
 $log
-Invoke-RestMethod http://127.0.0.1:8000/weight-logs
-Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/weight-logs/$($log.id)" `
+Invoke-RestMethod -Headers $headers http://127.0.0.1:8000/weight-logs
+Invoke-RestMethod -Headers $headers -Method Patch -Uri "http://127.0.0.1:8000/weight-logs/$($log.id)" `
   -ContentType application/json -Body '{"weight_kg":82.1}'
-Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:8000/weight-logs/$($log.id)"
+Invoke-RestMethod -Headers $headers -Method Delete -Uri "http://127.0.0.1:8000/weight-logs/$($log.id)"
 ```
 
 En logg har feltene `id` (UUID), `date` (`YYYY-MM-DD`) og `weight_kg` (tall).
 PATCH krever minst ett felt; eksplisitt `null` avvises. Ukjente felter og
 ugyldige verdier gir 422. Ukjent ID gir 404. Dato som allerede er registrert
 gir 409 med en `detail`-streng, også ved oppdatering. Databasen håndhever unik
-dato slik at samtidige kall heller ikke lager duplikater.
+kombinasjon av bruker og dato slik at samtidige kall heller ikke lager duplikater.
 
 ## Tester
 
@@ -153,14 +155,14 @@ uv run alembic upgrade head
 - `alembic/`: versjonerte databaseendringer.
 - `tests/`: drifts-, kontrakt- og PostgreSQL-integrasjonstester.
 
-Tjenesten er foreløpig for lokal bruk med én bruker, uten autentisering.
+Tjenesten bruker Clerk-autentisering og isolerer vektlogger per bruker.
 
 ## Standard fra FastAPI-service
 
 App-fabrikken `create_app(settings)` gir hver app sin egen late databasepool.
 Økter bruker async SQLAlchemy/Psycopg; poolen lukkes ved avslutning. Alembic
-bruker fortsatt synkron Psycopg for migreringer. Eksisterende modell og migrering
-`0001_create_weight_logs` er uendret; ingen ny migrering eller database-reset kreves.
+bruker fortsatt synkron Psycopg for migreringer. Migrering `0001` er uendret;
+`0002` legger til brukeridentitet og eierskap uten database-reset.
 
 `DATABASE_REQUIRED=true` er satt i eksempelkonfigurasjonen og Compose. Da kreves
 `DATABASE_URL` ved oppstart, og `/readyz` kontrollerer databasen. `/healthz` og `/`
@@ -171,7 +173,8 @@ Alle svar får `X-Request-ID` og sikkerhetsheadere. Driftsfeil bruker
 `{"detail":"...","request_id":"..."}`. For kompatibilitet beholder
 `/weight-logs` sine eksisterende feilformater: 404/409 har kun `detail`, og 422
 har FastAPIs detaljerte valideringsliste. OpenAPI dokumenterer fortsatt dette.
-Ruter er ikke flyttet til `/api/v1`; eksisterende frontend og proxy virker uendret.
+Ruter er ikke flyttet til `/api/v1`; proxyen er uendret, men frontend sender
+Bearer-token for beskyttede kall.
 
 Strukturerte logger beholder exception-type og kildelokasjoner, men skjuler
 exception-meldinger og databaseparametre. Ikke logg måledata eller credentials.
@@ -186,3 +189,55 @@ via variablene i `.env.example`. Same-origin-proxyen trenger normalt ikke CORS.
 CI installerer låste avhengigheter, kjører Ruff, streng Pyright og alle tester med
 PostgreSQL, bygger Docker-image og tester containeren med produksjonsverter og
 påkrevd database. Den publiserer eller deployer ingenting.
+
+
+## Authentication and ownership
+
+All `/weight-logs` operations require `Authorization: Bearer <Clerk session token>`.
+Configure `CLERK_ISSUER` with the exact Clerk instance HTTPS origin and
+`CLERK_AUTHORIZED_PARTIES` with comma-separated frontend origins (for example
+`http://localhost:5173`). Add the explicit LAN origin when testing over Wi-Fi.
+These values are public configuration; this API does not need a Clerk secret key.
+Missing authentication returns 401; unavailable/missing verification configuration
+returns 503. `/`, `/healthz`, and `/readyz` remain public.
+
+The API accepts RS256 session tokens from the configured issuer, checks expiry,
+not-before, issued-at, subject, session ID and authorized party, and rejects pending
+sessions. Public signing keys are fetched with a five-second timeout and cached
+for five minutes; refresh attempts have a 30-second cooldown. There is no Clerk
+API call for user metadata on each request. Token expiry bounds how long a revoked
+session can remain usable; immediate revocation checking is not implemented.
+
+`users.id` is an internal UUID. `external_identities` maps issuer + subject to it;
+email addresses never establish ownership. Every weight query includes that UUID,
+and dates are unique per user. Other users' record IDs return 404.
+
+### Assign existing measurements to your account
+
+Migration `0002` preserves existing measurements with nullable `user_id`. They are
+hidden from all accounts until explicitly assigned. New API-created logs always
+have an owner. Sign in and open the weight page first to provision your identity.
+Then verify your own `user_...` identifier in the Clerk Dashboard and run:
+
+```powershell
+uv run python -m src.claim_legacy --subject user_YOUR_VERIFIED_ID
+uv run python -m src.claim_legacy --subject user_YOUR_VERIFIED_ID --apply
+```
+
+With Compose, run the same module in the configured weight-service container:
+
+```powershell
+docker compose exec weight-service python -m src.claim_legacy --subject user_YOUR_VERIFIED_ID
+docker compose exec weight-service python -m src.claim_legacy --subject user_YOUR_VERIFIED_ID --apply
+```
+
+The first command only reports the count. The second assigns **all unclaimed
+measurements** to that already-existing identity in one transaction. The issuer
+comes from `CLERK_ISSUER`; the command cannot create an identity or reassign owned
+rows. Rerunning after success reports zero. If your new account already has a log
+on a legacy date, the unique constraint aborts the whole assignment; resolve the
+conflict deliberately before retrying. Never guess the subject or use an email.
+
+Downgrading `0002` restores global date uniqueness and therefore fails atomically
+if multiple users now have measurements on the same date. Do not downgrade a
+multi-user database without an explicit data migration plan.

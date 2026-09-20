@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="forbid")
 
     app_name: str = "Emberpath Weight Service"
+    clerk_issuer: str | None = None
+    clerk_authorized_parties: Annotated[list[str], NoDecode] = []
     app_version: str = "0.1.0"
     environment: Literal["development", "test", "production"] = "development"
     database_url: PostgresDsn | None = None
@@ -54,6 +56,25 @@ class Settings(BaseSettings):
     docs_enabled: bool | None = None
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
+    @field_validator("clerk_issuer")
+    @classmethod
+    def validate_clerk_issuer(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.port
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("CLERK_ISSUER must be an HTTPS origin")
+        return value.rstrip("/")
+
     @field_validator("database_url")
     @classmethod
     def validate_database_driver(cls, value: PostgresDsn | None) -> PostgresDsn | None:
@@ -63,7 +84,12 @@ class Settings(BaseSettings):
 
     # Pydantic Settings otherwise expects a JSON array for list-valued environment variables.
     @field_validator(
-        "allowed_hosts", "cors_origins", "cors_methods", "cors_headers", mode="before"
+        "allowed_hosts",
+        "cors_origins",
+        "cors_methods",
+        "cors_headers",
+        "clerk_authorized_parties",
+        mode="before",
     )
     @classmethod
     def split_csv(cls, value: str | list[str]) -> list[str]:
@@ -95,7 +121,7 @@ class Settings(BaseSettings):
             normalized_hosts.append(host)
         return normalized_hosts
 
-    @field_validator("cors_origins")
+    @field_validator("cors_origins", "clerk_authorized_parties")
     @classmethod
     def validate_cors_origins(cls, values: list[str]) -> list[str]:
         normalized_origins: list[str] = []
@@ -138,6 +164,13 @@ class Settings(BaseSettings):
                 f"{parsed.scheme}://{normalized_host}{port_suffix}"
             )
         return normalized_origins
+
+    @field_validator("clerk_authorized_parties")
+    @classmethod
+    def reject_wildcard_parties(cls, values: list[str]) -> list[str]:
+        if "*" in values:
+            raise ValueError("CLERK_AUTHORIZED_PARTIES must contain explicit origins")
+        return values
 
     @field_validator("cors_methods")
     @classmethod

@@ -1,8 +1,10 @@
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.core.auth import get_current_user
 from src.core.config import Settings
 from src.core.database import get_session
 from src.main import create_app
@@ -27,6 +29,7 @@ async def test_weight_validation_body_and_protocol_headers_are_preserved():
         yield AsyncMock()
 
     application.dependency_overrides[get_session] = unused_session
+    application.dependency_overrides[get_current_user] = uuid4
     async with AsyncClient(
         transport=ASGITransport(app=application), base_url="http://test"
     ) as client:

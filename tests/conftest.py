@@ -6,11 +6,13 @@ from unittest.mock import patch
 
 import pytest
 from alembic.config import Config
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alembic import command
+from src.core.auth import Identity, get_identity
 from src.core.config import Settings
 from src.core.database import Database, get_session
 
@@ -48,6 +50,14 @@ async def client(test_database_url: str) -> AsyncIterator[AsyncClient]:
         database_url=test_database_url, database_required=True, _env_file=None
     )
     application = create_app(settings)
+
+    def test_identity(request: Request) -> Identity:
+        return Identity(
+            "https://test.clerk.accounts.dev",
+            request.headers.get("X-Test-Subject", "user_test"),
+        )
+
+    application.dependency_overrides[get_identity] = test_identity
     database: Database = application.state.database
     async with (
         application.router.lifespan_context(application),

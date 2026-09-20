@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
 from src.api.schemas import ErrorResponse
+from src.core.auth import TokenVerifier
 from src.core.config import Settings, get_settings
 from src.core.database import Database
 from src.core.logging import configure_logging
@@ -177,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_middleware(RequestContextMiddleware)
     application.add_exception_handler(RequestValidationError, validation_error_handler)
     application.add_exception_handler(StarletteHTTPException, http_error_handler)
+    application.state.token_verifier = TokenVerifier(app_settings)
     application.state.database = database
     application.include_router(create_metadata_router(app_settings))
     application.include_router(create_health_router(app_settings, database))
