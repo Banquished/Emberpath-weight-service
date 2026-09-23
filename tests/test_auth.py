@@ -107,6 +107,12 @@ async def test_routes_require_auth_but_health_is_public():
     ) as client:
         for method, path in [
             ("get", "/weight-logs"),
+            ("get", "/weight-logs/export"),
+            ("post", "/weight-logs/import/preview"),
+            ("post", "/weight-logs/import"),
+            ("get", "/weight-goals/active"),
+            ("put", "/weight-goals/active"),
+            ("patch", "/weight-goals/not-an-id"),
             ("post", "/weight-logs"),
             ("get", "/weight-logs/not-an-id"),
             ("patch", "/weight-logs/not-an-id"),

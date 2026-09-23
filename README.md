@@ -83,6 +83,7 @@ backend trenger derfor ikke bindes til alle nettverksgrensesnitt.
 | GET | `/healthz` | 200 og `{"status":"ok"}`, uten databasekall |
 | POST | `/weight-logs` | Opprett logg, 201 |
 | GET | `/weight-logs` | Liste, nyeste dato først |
+| GET | `/weight-logs/summary` | Oppsummering av innlogget brukers valgte periode |
 | GET | `/weight-logs/{id}` | Hent logg, 200 |
 | PATCH | `/weight-logs/{id}` | Endre dato og/eller vekt, 200 |
 | DELETE | `/weight-logs/{id}` | Slett logg, 204 uten responsinnhold |
@@ -241,3 +242,108 @@ conflict deliberately before retrying. Never guess the subject or use an email.
 Downgrading `0002` restores global date uniqueness and therefore fails atomically
 if multiple users now have measurements on the same date. Do not downgrade a
 multi-user database without an explicit data migration plan.
+
+### Period summary
+
+`GET /weight-logs/summary?start_date=2026-09-01&end_date=2026-09-30`
+accepts optional inclusive ISO dates. Omitted boundaries are unbounded; an inverted
+range returns 422. Authentication and ownership rules match the CRUD endpoints.
+
+The response contains `measurement_count`, `mean_weight_kg`, `first`, `latest`,
+`change_kg` and `change_percent`. First/latest include the existing measurement
+ID, date and weight. The mean uses recorded measurements only; missing days are
+not zero or interpolated. Change is latest minus first; percent is that change
+divided by the first weight, multiplied by 100. Calculations use decimal arithmetic
+and round half up to two decimal places, serialized as JSON numbers.
+
+An empty period returns count 0 and null for every other field. A single measurement
+has a mean and first/latest entry, but null changes. Two equal weights give zero
+change. All-time is requested by omitting both dates.
+
+### Configurable rolling average
+
+`GET /weight-logs/rolling-average?start_date=2026-09-01&end_date=2026-09-30`
+accepts the same optional inclusive date boundaries and ownership rules as the
+summary endpoint. Optional `window_days` accepts `7`, `14`, or `30` (default `7`);
+unsupported values return 422. The response echoes `window_days` and returns
+ascending `points`, each containing
+`date`, `mean_weight_kg` and `measurement_count`.
+
+Each point averages recorded measurements on that date and the preceding
+`window_days - 1` calendar days (6, 13, or 29). Missing days are ignored; partial windows are included. Points
+exist only on recorded dates, never invented dates. The first visible points can
+use measurements before the requested start date, preserving the same trend when
+changing the selected period. No measurement after a point's date contributes.
+Means use decimal arithmetic and round half up to two decimal places. An empty
+period returns an empty points array; an inverted range returns 422.
+
+### Personal weight goals
+
+Goals belong to the authenticated user. `GET /weight-goals/active` returns the
+active goal or `null`. `PUT /weight-goals/active` accepts `target_weight_kg`,
+`start_date` (the user's local calendar date), optional `target_date`, and optional
+`baseline_weight_kg`. The target date must be after the start date; weight uses the same positive,
+maximum two-decimal constraints as measurements. An identical PUT is idempotent.
+Changing the target replaces the active goal while retaining its history.
+
+`PATCH /weight-goals/{id}` accepts `{ "status": "completed" }` or
+`{ "status": "cancelled" }`. Completion is explicit, never inferred from one
+measurement. Inactive goals return 409; another user's goal returns 404.
+Responses include `id`, `target_weight_kg`, `start_date`, `target_date`, `status`,
+`created_at` and `ended_at`. Timestamps use UTC. A database constraint and owner
+row lock ensure at most one active goal per user. Migration `0003` adds only the
+new goals table; measurements are unchanged. Historical goals are retained in
+storage; a history endpoint and projections are outside this first version.
+
+
+A dated goal requires a starting baseline. When omitted, the service uses the
+latest measurement on or before the start date for that user. If none exists,
+422 asks for a starting weight. The baseline is saved as a snapshot; later
+measurements do not move the plan. Saving a goal with the same start date reuses
+its baseline unless an explicit replacement baseline is supplied.
+
+Responses also include `baseline_weight_kg` and `plan`. A dated goal with a
+baseline returns `duration_days`, `total_change_kg`, `weekly_change_kg`, and
+`fortnightly_change_kg`. Weekly change is `(target - baseline) * 7 / duration_days`;
+fortnightly change uses 14. Values round half up to two decimal places. These
+values describe the user's plan, not a prediction or recommended rate.
+
+Undated goals and legacy goals without a baseline return `plan: null` and retain
+the flat target display. Save an existing goal to establish its baseline.
+Migration `0004` adds a nullable baseline without inferring historical values or
+changing measurements. Existing same-day goals remain readable without a plan;
+new dated goals require a positive duration.
+
+### Delimited measurement transfer
+
+All transfer endpoints require authentication and only access the current user's
+measurements. No goals are modified. Import accepts `.csv` or `.txt` text with
+an explicit comma, semicolon or tab delimiter. Files use `date,weight,unit`
+headers separated by the selected delimiter; header order and case are flexible. Use ISO `YYYY-MM-DD` dates, decimal
+points, and `kg` or `lb`. UTF-8 BOM, quoted fields, CRLF, and blank lines are
+supported. Duplicate dates within a file must be corrected before importing.
+
+Kilograms follow existing positive-weight validation (0.01-9999.99, at most two
+decimal places). Pounds allow up to six decimal places and convert using exactly
+0.45359237 kg/lb, rounded half up to two decimal places before validation.
+Scientific notation, formulas, and non-finite values are not accepted. Files are
+limited to 1 MiB of UTF-8 content and 10000 measurements.
+
+- `GET /weight-logs/export?delimiter=comma|semicolon|tab` downloads all measurements, oldest first,
+  with `date,weight,unit` columns and weights in kilograms to two decimal places. The filename uses `.csv` for every delimiter.
+- `POST /weight-logs/import/preview` accepts JSON with `content`, `delimiter` (`comma`, `semicolon`, or `tab`), and
+  optional `duplicate_policy` (`skip`, the default, or `replace`). It returns
+  `rows` with source `row`, parsed `date`, normalized `weight_kg`, `action`, and
+  `errors`; counts `imported`, `replaced`, `skipped`, and `errors`; and a
+  `preview_token`. Invalid fields appear as row errors; malformed files return
+  422. Preview does not write measurements.
+- `POST /weight-logs/import` accepts the same input plus `preview_token`. It
+  revalidates the entire file and returns `imported`, `replaced`, and `skipped`.
+  Any invalid row rejects the whole import with 422. Replacement preserves the
+  existing measurement ID. If relevant measurements or input changed since
+  preview, 409 requires another preview. A concurrent date conflict also rolls
+  back the entire import and returns 409. No partial import is saved.
+
+A preview token detects stale input/state; it is not an authorization credential.
+Ownership is enforced separately on every request. Importing historical values
+can update summaries and averages but never changes a saved goal baseline.

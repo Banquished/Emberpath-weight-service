@@ -29,7 +29,9 @@ from src.core.middleware import (
 )
 from src.routers.health import create_router as create_health_router
 from src.routers.metadata import create_router as create_metadata_router
+from src.routers.weight_goals import router as weight_goal_router
 from src.routers.weight_logs import router as weight_router
+from src.routers.weight_transfer import router as weight_transfer_router
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +68,10 @@ def error_response(
 
 
 def is_weight_path(path: str) -> bool:
-    return path == "/weight-logs" or path.startswith("/weight-logs/")
+    return any(
+        path == prefix or path.startswith(f"{prefix}/")
+        for prefix in ("/weight-logs", "/weight-goals")
+    )
 
 
 async def validation_error_handler(request: Request, error: Exception) -> JSONResponse:
@@ -182,7 +187,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.database = database
     application.include_router(create_metadata_router(app_settings))
     application.include_router(create_health_router(app_settings, database))
+    application.include_router(weight_transfer_router)
     application.include_router(weight_router)
+    application.include_router(weight_goal_router)
     configure_openapi(application)
     return application
 

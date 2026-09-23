@@ -4,6 +4,7 @@ from alembic import context
 from src.core.config import get_settings
 from src.core.database import Base
 from src.models.user import ExternalIdentity, User  # noqa: F401
+from src.models.weight_goal import WeightGoal  # noqa: F401
 from src.models.weight_log import WeightLog  # noqa: F401
 
 target_metadata = Base.metadata

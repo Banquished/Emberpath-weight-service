@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -9,8 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.auth import CurrentUser
 from src.core.database import get_session
+from src.domain.weight_rolling_average import rolling_average
+from src.domain.weight_summary import summarize_weights
 from src.models.weight_log import WeightLog
 from src.schemas.weight_log import WeightLogCreate, WeightLogRead, WeightLogUpdate
+from src.schemas.weight_rolling_average import (
+    RollingAverageWindow,
+    WeightRollingAverage,
+)
+from src.schemas.weight_summary import WeightSummary
 
 router = APIRouter(prefix="/weight-logs", tags=["weight logs"])
 DatabaseSession = Annotated[AsyncSession, Depends(get_session)]
@@ -61,6 +69,52 @@ async def list_weight_logs(
             .where(WeightLog.user_id == user_id)
             .order_by(WeightLog.date.desc())
         )
+    )
+
+
+@router.get("/summary", response_model=WeightSummary)
+async def get_weight_summary(
+    user_id: CurrentUser,
+    session: DatabaseSession,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> WeightSummary:
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(
+            status_code=422, detail="start_date must not be after end_date"
+        )
+    statement = select(WeightLog).where(WeightLog.user_id == user_id)
+    if start_date is not None:
+        statement = statement.where(WeightLog.date >= start_date)
+    if end_date is not None:
+        statement = statement.where(WeightLog.date <= end_date)
+    logs = await session.scalars(statement.order_by(WeightLog.date))
+    return summarize_weights([WeightLogRead.model_validate(log) for log in logs])
+
+
+@router.get("/rolling-average", response_model=WeightRollingAverage)
+async def get_weight_rolling_average(
+    user_id: CurrentUser,
+    session: DatabaseSession,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    window_days: RollingAverageWindow = RollingAverageWindow.WEEK,
+) -> WeightRollingAverage:
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(
+            status_code=422, detail="start_date must not be after end_date"
+        )
+    statement = select(WeightLog).where(WeightLog.user_id == user_id)
+    if start_date is not None:
+        lookback_days = min(window_days - 1, (start_date - date.min).days)
+        statement = statement.where(
+            WeightLog.date >= start_date - timedelta(days=lookback_days)
+        )
+    if end_date is not None:
+        statement = statement.where(WeightLog.date <= end_date)
+    logs = await session.scalars(statement.order_by(WeightLog.date))
+    return rolling_average(
+        [WeightLogRead.model_validate(log) for log in logs], start_date, window_days
     )
 
 
