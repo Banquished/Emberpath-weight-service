@@ -3,7 +3,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from psycopg.errors import UniqueViolation
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +11,7 @@ from src.core.auth import CurrentUser
 from src.core.database import get_session
 from src.domain.weight_rolling_average import rolling_average
 from src.domain.weight_summary import summarize_weights
-from src.models.weight_log import WeightLog
+from src.models.weight_log import WeightLog, is_weight_log_date_conflict
 from src.schemas.weight_log import WeightLogCreate, WeightLogRead, WeightLogUpdate
 from src.schemas.weight_rolling_average import (
     RollingAverageWindow,
@@ -38,10 +37,7 @@ async def save_log(log: WeightLog, session: AsyncSession) -> WeightLog:
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
-        if (
-            isinstance(error.orig, UniqueViolation)
-            and error.orig.diag.constraint_name == "uq_weight_logs_user_date"
-        ):
+        if is_weight_log_date_conflict(error):
             raise HTTPException(
                 status_code=409, detail="A weight log already exists for this date"
             ) from error

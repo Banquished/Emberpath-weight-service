@@ -2,7 +2,9 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+from psycopg.errors import UniqueViolation
 from sqlalchemy import CheckConstraint, ForeignKey, Numeric, UniqueConstraint
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.core.database import Base
@@ -19,3 +21,11 @@ class WeightLog(Base):
     user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     date: Mapped[date]
     weight_kg: Mapped[Decimal] = mapped_column(Numeric(6, 2))
+
+
+def is_weight_log_date_conflict(error: SQLAlchemyError) -> bool:
+    return (
+        isinstance(error, IntegrityError)
+        and isinstance(error.orig, UniqueViolation)
+        and error.orig.diag.constraint_name == "uq_weight_logs_user_date"
+    )

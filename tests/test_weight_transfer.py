@@ -1,6 +1,12 @@
+from datetime import date
+from decimal import Decimal
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.models.weight_log import WeightLog
 from src.schemas.weight_transfer import TransferDelimiter
 
 pytestmark = pytest.mark.anyio
@@ -183,7 +189,77 @@ async def test_stale_preview(client: AsyncClient, change: str) -> None:
         json={**payload, "preview_token": preview["preview_token"]},
     )
     assert response.status_code == 409
+    assert response.json() == {"detail": "Measurements changed; preview the file again"}
     assert (await client.get("/weight-logs", headers=headers)).json() == before
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "failure,expected_status,expected_detail",
+    [
+        ("duplicate", 409, "Measurements changed; preview the file again"),
+        ("check", 500, "Internal server error"),
+        ("database", 500, "Internal server error"),
+    ],
+)
+async def test_import_commit_database_failure_is_atomic(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    original = (
+        await client.post("/weight-logs", json={"date": "2026-09-21", "weight_kg": 80})
+    ).json()
+    payload = {
+        "content": (
+            "date,weight,unit\n2026-09-21,90,kg\n2026-09-22,91,kg\n2026-09-23,92,kg"
+        ),
+        "delimiter": "comma",
+        "duplicate_policy": "replace",
+    }
+    preview_response = await client.post("/weight-logs/import/preview", json=payload)
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["imported"] == 2 and preview["replaced"] == 1
+    commit = AsyncSession.commit
+
+    async def commit_with_failure(session: AsyncSession) -> None:
+        pending = [log for log in session.new if isinstance(log, WeightLog)]
+        if pending:
+            if failure == "database":
+                await session.flush()
+                raise OperationalError("COMMIT", None, RuntimeError("database failure"))
+            owner_id = pending[0].user_id
+            assert owner_id is not None
+            session.add(
+                WeightLog(
+                    user_id=owner_id,
+                    date=date(2026, 9, 22 if failure == "duplicate" else 24),
+                    weight_kg=Decimal("93" if failure == "duplicate" else "-1"),
+                )
+            )
+        await commit(session)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(AsyncSession, "commit", commit_with_failure)
+        response = await client.post(
+            "/weight-logs/import",
+            json={**payload, "preview_token": preview["preview_token"]},
+        )
+
+    assert response.status_code == expected_status
+    if failure == "duplicate":
+        assert response.json() == {"detail": expected_detail}
+    else:
+        assert response.json() == {
+            "detail": expected_detail,
+            "request_id": response.headers["X-Request-ID"],
+        }
+        assert any(record.message == "unhandled_exception" for record in caplog.records)
+    assert (await client.get("/weight-logs")).json() == [original]
 
 
 async def test_import_requires_preview_and_limits(client: AsyncClient) -> None:

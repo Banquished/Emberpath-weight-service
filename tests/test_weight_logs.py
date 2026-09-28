@@ -57,11 +57,12 @@ async def test_date_conflicts_do_not_change_existing_logs(client: AsyncClient) -
         "/weight-logs", json={"date": "2026-09-17", "weight_kg": 82}
     )
     assert response.status_code == 409
-    assert isinstance(response.json()["detail"], str)
+    assert response.json() == {"detail": "A weight log already exists for this date"}
     response = await client.patch(
         f"/weight-logs/{second['id']}", json={"date": "2026-09-17", "weight_kg": 79}
     )
     assert response.status_code == 409
+    assert response.json() == {"detail": "A weight log already exists for this date"}
     assert (await client.get("/weight-logs")).json() == [second, first]
     assert (
         await client.patch(f"/weight-logs/{first['id']}", json={"date": "2026-09-17"})

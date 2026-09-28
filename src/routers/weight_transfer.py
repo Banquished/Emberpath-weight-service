@@ -5,13 +5,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.auth import CurrentUser
 from src.core.database import get_session
 from src.domain.weight_transfer import parse_import, preview_import
-from src.models.weight_log import WeightLog
+from src.models.weight_log import WeightLog, is_weight_log_date_conflict
 from src.schemas.weight_transfer import (
     ImportCommit,
     ImportPreview,
@@ -98,11 +98,13 @@ async def import_weight_logs(
             session.add(WeightLog(user_id=user_id, date=row.date, weight_kg=weight))
     try:
         await session.commit()
-    except IntegrityError as error:
+    except SQLAlchemyError as error:
         await session.rollback()
-        raise HTTPException(
-            409, "Measurements changed; preview the file again"
-        ) from error
+        if is_weight_log_date_conflict(error):
+            raise HTTPException(
+                409, "Measurements changed; preview the file again"
+            ) from error
+        raise
     return ImportResult(
         imported=preview.imported, replaced=preview.replaced, skipped=preview.skipped
     )
