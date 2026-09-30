@@ -32,8 +32,11 @@ async def find_log(log_id: UUID, user_id: UUID, session: AsyncSession) -> Weight
     return log
 
 
-async def save_log(log: WeightLog, session: AsyncSession) -> WeightLog:
+async def save_log(log: WeightLog, session: AsyncSession) -> WeightLogRead:
     try:
+        await session.flush()
+        await session.refresh(log)
+        snapshot = WeightLogRead.model_validate(log)
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -42,14 +45,13 @@ async def save_log(log: WeightLog, session: AsyncSession) -> WeightLog:
                 status_code=409, detail="A weight log already exists for this date"
             ) from error
         raise
-    await session.refresh(log)
-    return log
+    return snapshot
 
 
 @router.post("", response_model=WeightLogRead, status_code=status.HTTP_201_CREATED)
 async def create_weight_log(
     payload: WeightLogCreate, user_id: CurrentUser, session: DatabaseSession
-) -> WeightLog:
+) -> WeightLogRead:
     log = WeightLog(**payload.model_dump(), user_id=user_id)
     session.add(log)
     return await save_log(log, session)
@@ -127,7 +129,7 @@ async def update_weight_log(
     payload: WeightLogUpdate,
     user_id: CurrentUser,
     session: DatabaseSession,
-) -> WeightLog:
+) -> WeightLogRead:
     log = await find_log(log_id, user_id, session)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(log, field, value)

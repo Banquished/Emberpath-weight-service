@@ -118,6 +118,9 @@ PATCH krever minst ett felt; eksplisitt `null` avvises. Ukjente felter og
 ugyldige verdier gir 422. Ukjent ID gir 404. Dato som allerede er registrert
 gir 409 med en `detail`-streng, også ved oppdatering. Databasen håndhever unik
 kombinasjon av bruker og dato slik at samtidige kall heller ikke lager duplikater.
+POST- og PATCH-svar viser verdiene som ble lagret av akkurat dette kallet.
+Et senere kall kan ha endret eller slettet målingen før svaret mottas; bruk GET
+for å lese gjeldende tilstand.
 
 ## Tester
 
@@ -308,6 +311,10 @@ row lock ensure at most one active goal per user. Migration `0003` adds only the
 new goals table; measurements are unchanged. Historical goals are retained in
 storage; a history endpoint and projections are outside this first version.
 
+PUT and PATCH responses describe the status when that request committed. If
+another request replaces the goal before the response arrives, the first PUT
+may acknowledge `active` while `GET /weight-goals/active` already shows the
+newer goal.
 
 A dated goal requires a starting baseline. When omitted, the service uses the
 latest measurement on or before the start date for that user. If none exists,

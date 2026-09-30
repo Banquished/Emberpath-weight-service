@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from src.models.user import User
 from src.models.weight_goal import WeightGoal
 from src.routers.weight_goals import set_active_goal
-from src.schemas.weight_goal import WeightGoalSet
+from src.schemas.weight_goal import WeightGoalRead, WeightGoalSet
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
 PAYLOAD = {
@@ -189,16 +189,22 @@ async def test_replacement_retains_history_and_identical_put_does_not(
                     await session.flush()
                     payload = WeightGoalSet.model_validate(PAYLOAD)
                     first = await set_active_goal(payload, owner.id, session)
+                    assert isinstance(first, WeightGoalRead)
                     same = await set_active_goal(payload, owner.id, session)
-                    assert same.id == first.id
+                    assert same == first
                     replacement = await set_active_goal(
                         payload.model_copy(update={"target_weight_kg": Decimal("90")}),
                         owner.id,
                         session,
                     )
-                    await session.refresh(first)
-                    assert first.status == "replaced"
-                    assert first.ended_at == replacement.created_at
+                    persisted_first = await session.get(
+                        WeightGoal, first.id, populate_existing=True
+                    )
+                    assert persisted_first is not None
+                    assert persisted_first.status == "replaced"
+                    assert persisted_first.ended_at == replacement.created_at
+                    assert first.status == "active"
+                    assert first.ended_at is None
                     goals = list(
                         await session.scalars(
                             select(WeightGoal).where(WeightGoal.user_id == owner.id)

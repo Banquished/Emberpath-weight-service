@@ -25,6 +25,14 @@ async def active_goal(user_id: UUID, session: AsyncSession) -> WeightGoal | None
     )
 
 
+async def commit_goal(goal: WeightGoal, session: AsyncSession) -> WeightGoalRead:
+    await session.flush()
+    await session.refresh(goal)
+    snapshot = WeightGoalRead.model_validate(goal)
+    await session.commit()
+    return snapshot
+
+
 @router.get("/active", response_model=WeightGoalRead | None)
 async def get_active_goal(
     user_id: CurrentUser, session: DatabaseSession
@@ -35,7 +43,7 @@ async def get_active_goal(
 @router.put("/active", response_model=WeightGoalRead)
 async def set_active_goal(
     payload: WeightGoalSet, user_id: CurrentUser, session: DatabaseSession
-) -> WeightGoal:
+) -> WeightGoalRead:
     # Lock the owner even when no goal exists, serializing concurrent replacements.
     await session.scalar(select(User).where(User.id == user_id).with_for_update())
     previous = await active_goal(user_id, session)
@@ -62,8 +70,7 @@ async def set_active_goal(
     if previous is not None and all(
         getattr(previous, field) == value for field, value in values.items()
     ):
-        await session.commit()
-        return previous
+        return await commit_goal(previous, session)
     now = datetime.now(UTC)
     if previous is not None:
         previous.status = "replaced"
@@ -71,9 +78,7 @@ async def set_active_goal(
         await session.flush()
     goal = WeightGoal(**values, user_id=user_id, status="active", created_at=now)
     session.add(goal)
-    await session.commit()
-    await session.refresh(goal)
-    return goal
+    return await commit_goal(goal, session)
 
 
 @router.patch("/{goal_id}", response_model=WeightGoalRead)
@@ -82,7 +87,7 @@ async def end_goal(
     payload: WeightGoalEnd,
     user_id: CurrentUser,
     session: DatabaseSession,
-) -> WeightGoal:
+) -> WeightGoalRead:
     await session.scalar(select(User).where(User.id == user_id).with_for_update())
     goal = await session.scalar(
         select(WeightGoal).where(
@@ -95,6 +100,4 @@ async def end_goal(
         raise HTTPException(status_code=409, detail="Weight goal is no longer active")
     goal.status = payload.status
     goal.ended_at = datetime.now(UTC)
-    await session.commit()
-    await session.refresh(goal)
-    return goal
+    return await commit_goal(goal, session)
