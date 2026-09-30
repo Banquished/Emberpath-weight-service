@@ -12,17 +12,20 @@ Python 3.13 eller nyere kreves; uv henter Python ved behov.
 ```powershell
 cd C:\Workspace\Repos\Emberpath-weight-service
 uv sync --locked
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-`.env` er lokal konfigurasjon og ignoreres av Git. Miljøvariabler overstyrer
-verdiene i filen. `DATABASE_URL` brukes av appen og Alembic. Sett
+Behold en eksisterende `.env`; fyll inn `DATABASE_URL` og Clerk-innstillingene
+i en ny kopi før lokal oppstart. Tjenestens `.env` brukes kun ved lokal kjøring
+fra dette repoet og ignoreres av Git. Compose leser bare hubrepoets
+`../Emberpath/.env`, ikke denne filen. Miljøvariabler overstyrer verdiene i
+filen. `DATABASE_URL` brukes av appen og Alembic. Sett
 `TEST_DATABASE_URL` kun som miljøvariabel i terminalen, aldri i `.env`: ukjente
 konfigurasjonsnøkler avvises. Testene leser ikke den lokale `.env`-filen. `uv.lock` låser avhengighetsversjonene.
 
 ## Kjør hele appen i Docker
 
-Docker Compose ligger i søsterrepoet `Emberpath`. Alle tre repoene må ligge
+Docker Compose ligger i søsterrepoet `Emberpath`. Repoene må ligge
 ved siden av hverandre. Dockerfilene ligger i tjenesterepoene.
 
 ```powershell
@@ -30,9 +33,12 @@ cd C:\Workspace\Repos\Emberpath
 docker compose up --build -d --wait
 ```
 
-Compose starter PostgreSQL, kjører `alembic upgrade head`, og starter backend
-og web etter vellykket migrering. Standardporter er web `5173`, API `8000`
-og PostgreSQL `5432`; de kan endres i hubrepoets `.env`. Stopp eventuell
+Compose starter begge PostgreSQL-databasene, kjører tjenestenes migreringer,
+og starter API-ene og web etter vellykket migrering. Standardporter er web `5173`,
+vekt-API `8000`, vekt-PostgreSQL `5432` og ernærings-PostgreSQL `5434`;
+publiserte porter kan overstyres i hubrepoets `.env`. Compose bruker
+`WEIGHT_API_PORT` for vekt-API-et; `API_PORT` er en utfaset fallback for eldre
+oppsett. Stopp eventuell
 Vite-server først, siden den også bruker port 5173. Web er tilgjengelig på
 lokalnettet; API og PostgreSQL er kun bundet til `127.0.0.1`.
 Data beholdes i et navngitt Docker-volum når containerne stoppes.
@@ -41,38 +47,43 @@ Se [felles oppstartsinstruksjoner](../Emberpath/readme.md).
 
 ## Kjør backend lokalt med PostgreSQL i Docker
 
-Start databasen fra hubrepoet:
+Hvis hubens Compose-stakk allerede kjører, la den stå. Ellers kan du starte
+bare vekt-databasen fra hubrepoet:
 
 ```powershell
 cd C:\Workspace\Repos\Emberpath
-docker compose stop weight-service
 docker compose up -d --wait postgres
 ```
 
-Kjør deretter fra dette repoet:
+Kjør deretter fra dette repoet på en ledig port når Compose allerede bruker
+vekt-API-porten `8000`:
 
 ```powershell
 cd C:\Workspace\Repos\Emberpath-weight-service
-uv run alembic upgrade head
-uv run uvicorn src.main:app --reload --port 8000
+uv run --locked uvicorn src.main:app --reload --port 8003
 ```
 
-Oppdater `DATABASE_URL` i backendens `.env` hvis hubrepoet bruker en annen
-PostgreSQL-port eller et annet passord. Kommandoene over forutsetter at API-port
-8000 er ledig; stopp en eventuell eksisterende API-prosess først. Unngå å
-starte både containeren og lokal Uvicorn på samme port. Hvis hubens `.env`
-har `POSTGRES_PORT=55432`, bruk
-`postgresql+psycopg://emberpath:emberpath_local@127.0.0.1:55432/emberpath`
-som `DATABASE_URL` med standardpassordet.
+Sett `DATABASE_URL` i tjenestens `.env` til `postgresql+psycopg` for
+vekt-databasen på `127.0.0.1` og hubens publiserte `POSTGRES_PORT` (standard
+`5432`). Bruk samme databasenavn, bruker og **faktiske passord** som den
+kjørende `postgres`-containeren; bruk `POSTGRES_PASSWORD` fra hubens `.env`
+og databasenavn/bruker i hubens `compose.yaml`. URL-kod spesialtegn i
+legitimasjonen.
+Et nytt passord i en lokal `.env` endrer ikke passordet i et eksisterende
+databasevolum. Compose har allerede kjørt migreringene for en kjørende stakk;
+kjør `uv run --locked alembic upgrade head` separat bare for en ny, umigrert
+database.
 
 `--reload` laster kodeendringer automatisk. På Windows velger denne modusen
 også Selector-eventløkken som async Psycopg krever; bruk kommandoen over ved
 lokal utvikling, og Linux-containeren for kjøring uten reload. Stopp med `Ctrl+C`.
-Swagger UI finnes på `http://127.0.0.1:8000/docs` ved standard port.
-Web bruker `/api` via Vite-proxy lokalt og Nginx-proxy i Docker, så nettleseren
-kan kalle API-et fra samme origin uten egen CORS-konfigurasjon. Det gjelder
-også fra telefon på samme Wi-Fi via `http://<PC-ens LAN-IP>:5173/weight`;
-backend trenger derfor ikke bindes til alle nettverksgrensesnitt.
+Swagger UI for denne Uvicorn-prosessen finnes på `http://127.0.0.1:8003/docs`.
+Webens `/api`-proxy peker fortsatt på Compose-tjenesten, ikke den separate
+Uvicorn-prosessen. Via proxyen kan nettleseren kalle API-et fra samme origin
+uten egen CORS-konfigurasjon, også fra telefon på samme Wi-Fi via
+`http://<PC-ens LAN-IP>:5173/weight`. For direkte nettleserkall til lokal
+Uvicorn må du konfigurere CORS for web-originen i tjenestens `.env`; backend
+trenger ikke bindes til alle nettverksgrensesnitt.
 
 ## API
 
@@ -197,7 +208,9 @@ påkrevd database. Den publiserer eller deployer ingenting.
 All `/weight-logs` operations require `Authorization: Bearer <Clerk session token>`.
 Configure `CLERK_ISSUER` with the exact Clerk instance HTTPS origin and
 `CLERK_AUTHORIZED_PARTIES` with comma-separated frontend origins (for example
-`http://localhost:5173`). Add the explicit LAN origin when testing over Wi-Fi.
+`http://localhost:5173`). For standalone runs use the same development issuer
+and origins as in the hub's `.env`, not a Clerk secret or a copied example.
+Add the explicit LAN origin when testing over Wi-Fi.
 These values are public configuration; this API does not need a Clerk secret key.
 Missing authentication returns 401; unavailable/missing verification configuration
 returns 503. `/`, `/healthz`, and `/readyz` remain public.
